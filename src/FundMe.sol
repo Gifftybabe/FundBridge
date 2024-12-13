@@ -1,72 +1,81 @@
-//SPDX-License-Identifier: MIT
-
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
+
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {PriceConverter} from "./PriceConverter.sol";
 
-error FundMe_NotOwner();
-error FundMe_NotEnoughETHSent();
-error FundMe_NoFundsToWithdraw();
-error FundMe_callFailed();
+error NotOwner();
 
 contract FundMe {
-
     using PriceConverter for uint256;
 
-    uint256 public constant MINIMUM_USD = 5e18;
-    address[] public fundersAddress;
-    address public immutable i_owner;
-
     mapping(address => uint256) public addressToAmountFunded;
+    address[] public funders;
 
-    constructor() {
+    // Could we make this constant?  /* hint: no! We should make it immutable! */
+    address public /* immutable */ i_owner;
+    uint256 public constant MINIMUM_USD = 5 * 10 ** 18;
+    AggregatorV3Interface private s_priceFeed;
+
+    constructor(address priceFeed) {
         i_owner = msg.sender;
-    }
-
-    modifier onlyOwner {
-        // require(msg.sender == i_owner, 'You are not the owner');
-        if(msg.sender != i_owner) {
-            revert FundMe_NotOwner();
-        }
-        _;
+        s_priceFeed = AggregatorV3Interface(priceFeed);
     }
 
     function fund() public payable {
-        // require(msg.value.getConversionRate() >= MINIMUM_USD, 'Not enough ETH sent');
-        if(msg.value.getConversionRate() < MINIMUM_USD) {
-            revert FundMe_NotEnoughETHSent();
-        }
+        require(msg.value.getConversionRate(s_priceFeed) >= MINIMUM_USD, "You need to spend more ETH!");
+        // require(PriceConverter.getConversionRate(msg.value) >= MINIMUM_USD, "You need to spend more ETH!");
+        addressToAmountFunded[msg.sender] += msg.value;
+        funders.push(msg.sender);
+    }
 
-        fundersAddress.push(msg.sender);
-        addressToAmountFunded[msg.sender] = addressToAmountFunded[msg.sender] + msg.value;
+    function getVersion() public view returns (uint256) {
+        // AggregatorV3Interface priceFeed = AggregatorV3Interface(0x694AA1769357215DE4FAC081bf1f309aDC325306);
+        return s_priceFeed.version();
+    }
+
+    modifier onlyOwner() {
+        // require(msg.sender == owner);
+        if (msg.sender != i_owner) revert NotOwner();
+        _;
     }
 
     function withdraw() public onlyOwner {
-        uint256 totalBalance = address(this).balance;
-        // require(totalBalance > 0, "No funds to withdraw");
-        if(totalBalance < 0) {
-            revert FundMe_NoFundsToWithdraw();
-        }
-
-        // Iterate over funders, resetting their balances
-        for(uint256 funderIndex = 0; funderIndex < fundersAddress.length; funderIndex++){
-            address funder = fundersAddress[funderIndex];
+        for (uint256 funderIndex = 0; funderIndex < funders.length; funderIndex++) {
+            address funder = funders[funderIndex];
             addressToAmountFunded[funder] = 0;
         }
+        funders = new address[](0);
+        // // transfer
+        // payable(msg.sender).transfer(address(this).balance);
 
-        // Reset fundersAddress array after withdrawing
-        delete fundersAddress;
+        // // send
+        // bool sendSuccess = payable(msg.sender).send(address(this).balance);
+        // require(sendSuccess, "Send failed");
 
-        // Ensure there's enough gas to complete the withdrawal
-        (bool callSuccess, ) = payable(msg.sender).call{value: totalBalance}("");
-        // require(callSuccess, "Call failed");
-        if(!callSuccess) {
-            revert FundMe_callFailed();
-        }
+        // call
+        (bool callSuccess,) = payable(msg.sender).call{value: address(this).balance}("");
+        require(callSuccess, "Call failed");
+    }
+    // Explainer from: https://solidity-by-example.org/fallback/
+    // Ether is sent to contract
+    //      is msg.data empty?
+    //          /   \
+    //         yes  no
+    //         /     \
+    //    receive()?  fallback()
+    //     /   \
+    //   yes   no
+    //  /        \
+    //receive()  fallback()
+
+    fallback() external payable {
+        fund();
     }
 
-    // You can add a getter for funders addresses if needed
-    function getFunders() public view returns (address[] memory) {
-        return fundersAddress;
+    receive() external payable {
+        fund();
     }
 }
+
